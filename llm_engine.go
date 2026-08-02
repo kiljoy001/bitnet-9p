@@ -13,7 +13,7 @@ import (
 type BitNetEngine struct {
 	mu           sync.RWMutex
 	ModelName    string
-	Quantization string // "BitNet-1.58b"
+	Quantization string // "BitNet-1.58b TL2"
 	SystemPrompt string
 	Temperature  float32
 	MaxTokens    int
@@ -29,14 +29,14 @@ type BitNetEngine struct {
 // NewBitNetEngine initializes the 1-bit LLM streaming engine
 func NewBitNetEngine() *BitNetEngine {
 	return &BitNetEngine{
-		ModelName:    "BitNet-b1.58-3B",
-		Quantization: "1.58-bit Ternary",
+		ModelName:    "BitNet-b1.58-large",
+		Quantization: "1.58-bit TL2 Ternary",
 		SystemPrompt: "You are the narrator of The Grid, a hard-core Plan 9 operating system MUD.",
 		Temperature:  0.7,
-		MaxTokens:    128,
-		TokensPerSec: 42.5,
+		MaxTokens:    64,
+		TokensPerSec: 55.0,
 		BinaryPath:   "/home/scott/Repo/bitnet.cpp/build/bin/llama-cli",
-		ModelPath:    "/home/scott/Repo/bitnet.cpp/models/bitnet_b1_58-large/ggml-model-i2_s.gguf",
+		ModelPath:    "/home/scott/Repo/bitnet.cpp/models/bitnet_b1_58-large/ggml-model-tl2.gguf",
 	}
 }
 
@@ -45,18 +45,18 @@ func (e *BitNetEngine) SetPrompt(prompt string) {
 	e.mu.Lock()
 	e.LastPrompt = prompt
 	e.IsGenerating = true
-	e.StreamBuffer = []byte("[Inference starting...] ")
+	e.StreamBuffer = []byte("[C++ BitNet 1.58-bit Inference Engine starting...] ")
 	e.mu.Unlock()
 
 	// Generate response tokens asynchronously
 	go e.generateTokens(prompt)
 }
 
-// generateTokens runs real bitnet.cpp/llama-cli or fallback simulation
+// generateTokens runs real bitnet.cpp/llama-cli binary
 func (e *BitNetEngine) generateTokens(prompt string) {
 	fullPrompt := fmt.Sprintf("%s\nUser: %s\nResponse:", e.SystemPrompt, prompt)
 
-	// Attempt real C++ binary execution if model & binary exist
+	// Execute C++ BitNet binary with real 1.58-bit GGUF model weights
 	cmd := exec.Command(e.BinaryPath,
 		"-m", e.ModelPath,
 		"-p", fullPrompt,
@@ -67,7 +67,7 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 
 	stdout, err := cmd.StdoutPipe()
 	if err == nil && cmd.Start() == nil {
-		log.Printf("[bitnet-9p] Executing real BitNet C++ inference: %s", cmd.String())
+		log.Printf("[bitnet-9p] Executing C++ BitNet LLM inference: %s", cmd.String())
 		e.mu.Lock()
 		e.StreamBuffer = []byte{}
 		e.mu.Unlock()
@@ -95,34 +95,11 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 		return
 	}
 
-	// Fallback response generator if binary or model is building
-	words := []string{
-		"The", "circuits", "of", "The", "Grid", "hum", "with", "static", "electricity.",
-		"Neon", "light", "reflects", "off", "the", "kernel", "memory", "pathways.",
-		"Query:", fmt.Sprintf("%q.", prompt),
-		"Status:", "Real", "BitNet", "C++", "inference", "engine", "is", "active.",
-	}
-
-	start := time.Now()
-	for i, word := range words {
-		time.Sleep(15 * time.Millisecond)
-		e.mu.Lock()
-		if i == 0 {
-			e.StreamBuffer = []byte(word + " ")
-		} else {
-			e.StreamBuffer = append(e.StreamBuffer, []byte(word+" ")...)
-		}
-		e.TotalTokens++
-		e.mu.Unlock()
-	}
-
+	// Fallback error logging if binary fails
+	log.Printf("[bitnet-9p] Binary execution failed: %v", err)
 	e.mu.Lock()
-	e.StreamBuffer = append(e.StreamBuffer, []byte("\n")...)
+	e.StreamBuffer = []byte("Error: Could not execute C++ BitNet binary.\n")
 	e.IsGenerating = false
-	elapsed := time.Since(start).Seconds()
-	if elapsed > 0 {
-		e.TokensPerSec = float64(len(words)) / elapsed
-	}
 	e.mu.Unlock()
 }
 
@@ -140,8 +117,8 @@ func (e *BitNetEngine) GetInfo() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return fmt.Sprintf(
-		"Model: %s\nPrecision: %s\nTokens/sec: %.1f\nTotal Tokens Generated: %d\nSystem Prompt: %s\nBinary Path: %s\nStatus: %s\n",
-		e.ModelName, e.Quantization, e.TokensPerSec, e.TotalTokens, e.SystemPrompt, e.BinaryPath,
+		"Model: %s\nPrecision: %s\nTokens/sec: %.1f\nTotal Tokens Generated: %d\nSystem Prompt: %s\nBinary Path: %s\nModel Path: %s\nStatus: %s\n",
+		e.ModelName, e.Quantization, e.TokensPerSec, e.TotalTokens, e.SystemPrompt, e.BinaryPath, e.ModelPath,
 		map[bool]string{true: "GENERATING", false: "IDLE"}[e.IsGenerating],
 	)
 }
