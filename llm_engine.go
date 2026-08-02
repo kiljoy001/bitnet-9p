@@ -120,7 +120,7 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 }
 
 // GetStreamBuffer returns a copy of the current streaming output buffer
-func (e.BitNetEngine) GetStreamBuffer() []byte {
+func (e *BitNetEngine) GetStreamBuffer() []byte {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	bufCopy := make([]byte, len(e.StreamBuffer))
