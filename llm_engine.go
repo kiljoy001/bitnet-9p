@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,40 +47,54 @@ func (e *BitNetEngine) SetPrompt(prompt string) {
 	e.mu.Lock()
 	e.LastPrompt = prompt
 	e.IsGenerating = true
-	e.StreamBuffer = []byte("[C++ BitNet 1.58-bit Inference Engine starting...] ")
+	e.StreamBuffer = []byte("[Orange Pi 5 Plus ARM64 C++ BitNet LLM Inference Engine starting...] ")
 	e.mu.Unlock()
 
 	// Generate response tokens asynchronously
 	go e.generateTokens(prompt)
 }
 
-// generateTokens runs real bitnet.cpp/llama-cli binary
+// generateTokens runs real bitnet.cpp/llama-cli binary on Orange Pi 5 Plus
 func (e *BitNetEngine) generateTokens(prompt string) {
 	fullPrompt := fmt.Sprintf("%s\nUser: %s\nResponse:", e.SystemPrompt, prompt)
 
-	// Execute C++ BitNet binary with real 1.58-bit GGUF model weights
+	// Execute C++ BitNet binary natively on ARM64 NEON hardware
 	cmd := exec.Command(e.BinaryPath,
 		"-m", e.ModelPath,
 		"-p", fullPrompt,
 		"-n", fmt.Sprintf("%d", e.MaxTokens),
 		"--temp", fmt.Sprintf("%.2f", e.Temperature),
 		"-t", "4",
+		"--no-display-prompt",
 	)
+
+	// Set LD_LIBRARY_PATH for C++ shared libraries on Orange Pi 5 Plus
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/home/scott/Repo/bitnet.cpp/build/bin")
 
 	stdout, err := cmd.StdoutPipe()
 	if err == nil && cmd.Start() == nil {
 		log.Printf("[bitnet-9p] Executing C++ BitNet LLM inference: %s", cmd.String())
-		e.mu.Lock()
-		e.StreamBuffer = []byte{}
-		e.mu.Unlock()
 
 		start := time.Now()
 		scanner := bufio.NewScanner(stdout)
 		scanner.Split(bufio.ScanWords)
+
+		firstToken := true
 		for scanner.Scan() {
-			token := scanner.Text() + " "
+			word := scanner.Text()
+			// Filter out progress spinners / load markers
+			if strings.Contains(word, "Loading") || strings.Contains(word, "llama_") || strings.Contains(word, "main:") {
+				continue
+			}
+
+			token := word + " "
 			e.mu.Lock()
-			e.StreamBuffer = append(e.StreamBuffer, []byte(token)...)
+			if firstToken {
+				e.StreamBuffer = []byte(token)
+				firstToken = false
+			} else {
+				e.StreamBuffer = append(e.StreamBuffer, []byte(token)...)
+			}
 			e.TotalTokens++
 			e.mu.Unlock()
 		}
@@ -104,7 +120,7 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 }
 
 // GetStreamBuffer returns a copy of the current streaming output buffer
-func (e *BitNetEngine) GetStreamBuffer() []byte {
+func (e.BitNetEngine) GetStreamBuffer() []byte {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	bufCopy := make([]byte, len(e.StreamBuffer))
@@ -117,7 +133,7 @@ func (e *BitNetEngine) GetInfo() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return fmt.Sprintf(
-		"Model: %s\nPrecision: %s\nTokens/sec: %.1f\nTotal Tokens Generated: %d\nSystem Prompt: %s\nBinary Path: %s\nModel Path: %s\nStatus: %s\n",
+		"Model: %s\nPrecision: %s\nHost Node: Orange Pi 5 Plus (8-Core ARM64 RK3588)\nTokens/sec: %.1f\nTotal Tokens Generated: %d\nSystem Prompt: %s\nBinary Path: %s\nModel Path: %s\nStatus: %s\n",
 		e.ModelName, e.Quantization, e.TokensPerSec, e.TotalTokens, e.SystemPrompt, e.BinaryPath, e.ModelPath,
 		map[bool]string{true: "GENERATING", false: "IDLE"}[e.IsGenerating],
 	)
