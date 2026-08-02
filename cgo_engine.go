@@ -40,7 +40,8 @@ static int init_bitnet_cgo(const char * model_path) {
 
 static int token_to_str(llama_token token, char * buf, int buf_len) {
     if (!g_state.model) return 0;
-    return llama_token_to_piece(g_state.model, token, buf, buf_len, 0, false);
+    const struct llama_vocab * vocab = llama_model_get_vocab(g_state.model);
+    return llama_token_to_piece(vocab, token, buf, buf_len, 0, false);
 }
 */
 import "C"
@@ -86,7 +87,7 @@ func NewCgoBitNetEngine(modelPath string) *CgoBitNetEngine {
 		engine.Loaded = true
 		log.Printf("[cgo-bitnet-9p] Successfully loaded BitNet 1.58-bit model directly into RAM memory!")
 	} else {
-		log.Printf("[cgo-bitnet-9p] Cgo model load returned code: %d. Falling back to stdout pipe engine.", ret)
+		log.Printf("[cgo-bitnet-9p] Cgo model load returned code: %d.", ret)
 	}
 
 	return engine
@@ -104,7 +105,6 @@ func (e *CgoBitNetEngine) SetPrompt(prompt string) {
 
 func (e *CgoBitNetEngine) generateTokens(prompt string) {
 	if !e.Loaded {
-		// Call process engine if Cgo failed
 		fallback := NewBitNetEngine()
 		fallback.generateTokens(prompt)
 		e.mu.Lock()
@@ -114,7 +114,6 @@ func (e *CgoBitNetEngine) generateTokens(prompt string) {
 		return
 	}
 
-	// Token generation in-process
 	e.mu.Lock()
 	e.StreamBuffer = []byte(fmt.Sprintf("The circuits of The Grid process query: %q. Neon memory pathways glow in Sector Baudway.\n", prompt))
 	e.TotalTokens += 25
