@@ -65,7 +65,6 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 		"-n", fmt.Sprintf("%d", e.MaxTokens),
 		"--temp", fmt.Sprintf("%.2f", e.Temperature),
 		"-t", "4",
-		"--no-display-prompt",
 	)
 
 	// Set LD_LIBRARY_PATH for C++ shared libraries on Orange Pi 5 Plus
@@ -83,7 +82,7 @@ func (e *BitNetEngine) generateTokens(prompt string) {
 		for scanner.Scan() {
 			word := scanner.Text()
 			// Filter out progress spinners / load markers
-			if strings.Contains(word, "Loading") || strings.Contains(word, "llama_") || strings.Contains(word, "main:") {
+			if strings.Contains(word, "Loading") || strings.Contains(word, "llama_") || strings.Contains(word, "main:") || strings.Contains(word, "|") || strings.Contains(word, "/") || strings.Contains(word, "\\") {
 				continue
 			}
 
