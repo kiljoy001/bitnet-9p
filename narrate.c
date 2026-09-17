@@ -19,7 +19,7 @@ static char *addr = "tcp!127.0.0.1!5647";
 static void
 usage(void)
 {
-	fprint(2, "usage: narrate [-a addr] [-w worldfile] action...\n");
+	fprint(2, "usage: narrate [-a addr] [-w worldfile] [-s sysprompt] [-S sysfile] [action...]\n");
 	exits("usage");
 }
 
@@ -64,11 +64,13 @@ catfile(CFsys *fs, char *name)
 void
 threadmain(int argc, char **argv)
 {
-	char *worldfile, *action, *wbuf;
+	char *worldfile, *sysfile, *sysprompt, *action, *wbuf, *sbuf;
 	CFsys *fs;
 	int i, len, off, fd;
 
 	worldfile = nil;
+	sysfile = nil;
+	sysprompt = nil;
 
 	ARGBEGIN {
 	case 'a':
@@ -77,29 +79,52 @@ threadmain(int argc, char **argv)
 	case 'w':
 		worldfile = EARGF(usage());
 		break;
+	case 's':
+		sysprompt = EARGF(usage());
+		break;
+	case 'S':
+		sysfile = EARGF(usage());
+		break;
 	default:
 		usage();
 	} ARGEND
 
-	if (argc < 1)
-		usage();
-
-	/* Join the action words back into one line. */
-	len = 1;
-	for (i = 0; i < argc; i++)
-		len += strlen(argv[i]) + 1;
-	action = mallocz(len, 1);
-	if (action == nil)
-		sysfatal("out of memory");
-	for (i = 0; i < argc; i++) {
-		if (i > 0)
-			strcat(action, " ");
-		strcat(action, argv[i]);
+	if (argc < 1 || (argc == 1 && strcmp(argv[0], "-") == 0)) {
+		char inbuf[1024];
+		long n;
+		len = 0;
+		action = mallocz(8 * 1024, 1);
+		if (action == nil)
+			sysfatal("out of memory");
+		while ((n = read(0, inbuf, sizeof(inbuf))) > 0) {
+			if (len + n >= 8 * 1024 - 1)
+				n = 8 * 1024 - 1 - len;
+			memmove(action + len, inbuf, n);
+			len += n;
+			if (len >= 8 * 1024 - 1)
+				break;
+		}
+		action[len] = '\0';
+		if (len == 0)
+			usage();
+	} else {
+		/* Join the action words back into one line. */
+		len = 1;
+		for (i = 0; i < argc; i++)
+			len += strlen(argv[i]) + 1;
+		action = mallocz(len, 1);
+		if (action == nil)
+			sysfatal("out of memory");
+		for (i = 0; i < argc; i++) {
+			if (i > 0)
+				strcat(action, " ");
+			strcat(action, argv[i]);
+		}
 	}
 
 	/*
 	 * One connection for the whole run: the server gives each connection
-	 * its own session, so world and prompt must share this fd.
+	 * its own session, so world, ctl, and prompt must share this fd.
 	 */
 	fd = dial(addr, nil, nil, nil);
 	if (fd < 0)
@@ -107,6 +132,36 @@ threadmain(int argc, char **argv)
 	fs = fsmount(fd, nil);
 	if (fs == nil)
 		sysfatal("fsmount %s: %r", addr);
+
+	/* Set system prompt if requested. */
+	if (sysprompt != nil) {
+		int clen = strlen(sysprompt) + 5;
+		char *cbuf = mallocz(clen, 1);
+		if (cbuf == nil)
+			sysfatal("out of memory");
+		snprint(cbuf, clen, "sys %s", sysprompt);
+		if (putfile(fs, "ctl", cbuf, strlen(cbuf)) < 0)
+			exits("ctl");
+		free(cbuf);
+	} else if (sysfile != nil) {
+		int sfd;
+		long n;
+		sfd = open(sysfile, OREAD);
+		if (sfd < 0)
+			sysfatal("open %s: %r", sysfile);
+		sbuf = mallocz(8 * 1024, 1);
+		if (sbuf == nil)
+			sysfatal("out of memory");
+		strcpy(sbuf, "sys ");
+		off = 4;
+		while ((n = read(sfd, sbuf + off, 8 * 1024 - off - 1)) > 0)
+			off += n;
+		close(sfd);
+		sbuf[off] = '\0';
+		if (putfile(fs, "ctl", sbuf, off) < 0)
+			exits("ctl");
+		free(sbuf);
+	}
 
 	/* Pin the world first so it is in place before the prompt runs. */
 	if (worldfile != nil) {
