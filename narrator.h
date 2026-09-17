@@ -34,6 +34,8 @@ void narrator_free(Narrator *n);
 /* Sampling controls. Applied to the next generation. */
 void narrator_set_temp(Narrator *n, float temp);
 void narrator_set_top_p(Narrator *n, float top_p);
+void narrator_set_top_k(Narrator *n, int top_k);
+void narrator_set_repeat_penalty(Narrator *n, float repeat_penalty);
 void narrator_set_seed(Narrator *n, unsigned int seed);
 void narrator_set_max_tokens(Narrator *n, int max_tokens);
 

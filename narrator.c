@@ -38,6 +38,8 @@ struct Narrator {
 
 	float temp;
 	float top_p;
+	int top_k;
+	float repeat_penalty;
 	unsigned int seed;
 	int max_tokens;
 	int n_ctx;
@@ -136,6 +138,12 @@ build_sampler(Narrator *n)
 	if (n->temp <= 0.0f) {
 		llama_sampler_chain_add(chain, llama_sampler_init_greedy());
 	} else {
+		if (n->repeat_penalty > 1.0f) {
+			llama_sampler_chain_add(chain, llama_sampler_init_penalties(
+			    64, n->repeat_penalty, 0.0f, 0.0f));
+		}
+		if (n->top_k > 0)
+			llama_sampler_chain_add(chain, llama_sampler_init_top_k(n->top_k));
 		llama_sampler_chain_add(chain, llama_sampler_init_top_p(n->top_p, 1));
 		llama_sampler_chain_add(chain, llama_sampler_init_temp(n->temp));
 		llama_sampler_chain_add(chain, llama_sampler_init_dist(n->seed));
@@ -156,8 +164,10 @@ narrator_new(int n_ctx, int n_threads)
 	if (n == NULL)
 		return NULL;
 
-	n->temp = 0.7f;
+	n->temp = 0.5f;
 	n->top_p = 0.9f;
+	n->top_k = 40;
+	n->repeat_penalty = 1.15f;
 	n->seed = (unsigned int)LLAMA_DEFAULT_SEED;
 	n->max_tokens = 128;
 	n->n_ctx = n_ctx > 0 ? n_ctx : 512;
@@ -226,6 +236,20 @@ narrator_set_top_p(Narrator *n, float top_p)
 {
 	if (n != NULL && top_p > 0.0f && top_p <= 1.0f)
 		n->top_p = top_p;
+}
+
+void
+narrator_set_top_k(Narrator *n, int top_k)
+{
+	if (n != NULL && top_k >= 0)
+		n->top_k = top_k;
+}
+
+void
+narrator_set_repeat_penalty(Narrator *n, float repeat_penalty)
+{
+	if (n != NULL && repeat_penalty >= 1.0f)
+		n->repeat_penalty = repeat_penalty;
 }
 
 void
@@ -470,12 +494,15 @@ narrator_info(Narrator *n, char *buf, size_t count)
 	    "Threads: %d\n"
 	    "Temperature: %.2f\n"
 	    "Top-p: %.2f\n"
+	    "Top-k: %d\n"
+	    "Repeat penalty: %.2f\n"
 	    "Max tokens: %d\n"
 	    "Tokens/sec: %.1f\n"
 	    "Total tokens: %lu\n"
 	    "Stream bytes: %lu\n"
 	    "Status: %s\n",
 	    g_model_name, n->n_ctx, n->n_threads, n->temp, n->top_p,
+	    n->top_k, n->repeat_penalty,
 	    n->max_tokens, n->tokens_per_sec, n->total_tokens,
 	    (unsigned long)n->len, n->generating ? "GENERATING" : "IDLE");
 	pthread_mutex_unlock(&n->mu);

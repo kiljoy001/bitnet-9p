@@ -273,6 +273,26 @@ ctlwrite(Session *s, char *msg, int len)
 			else
 				narrator_set_top_p(s->nar, (float)f);
 		}
+	} else if (strcmp(cb->f[0], "top_k") == 0 || strcmp(cb->f[0], "topk") == 0) {
+		if (cb->nf < 2) {
+			err = "usage: top_k <int>";
+		} else {
+			v = atoi(cb->f[1]);
+			if (v < 0 || v > 1000)
+				err = "top_k out of range [0, 1000]";
+			else
+				narrator_set_top_k(s->nar, v);
+		}
+	} else if (strcmp(cb->f[0], "rep") == 0 || strcmp(cb->f[0], "repeat") == 0) {
+		if (cb->nf < 2) {
+			err = "usage: rep <float>";
+		} else {
+			f = strtod(cb->f[1], nil);
+			if (f < 1.0 || f > 2.5)
+				err = "rep out of range [1.0, 2.5]";
+			else
+				narrator_set_repeat_penalty(s->nar, (float)f);
+		}
 	} else if (strcmp(cb->f[0], "max") == 0) {
 		if (cb->nf < 2) {
 			err = "usage: max <int>";
