@@ -19,7 +19,7 @@ static char *addr = "tcp!127.0.0.1!5647";
 static void
 usage(void)
 {
-	fprint(2, "usage: narrate [-a addr] [-w worldfile] [-s sysprompt] [-S sysfile] [action...]\n");
+	fprint(2, "usage: narrate [-a addr] [-w worldfile] [-s sysprompt] [-S sysfile] [-T temp] [-M max] [action...]\n");
 	exits("usage");
 }
 
@@ -64,13 +64,15 @@ catfile(CFsys *fs, char *name)
 void
 threadmain(int argc, char **argv)
 {
-	char *worldfile, *sysfile, *sysprompt, *action, *wbuf, *sbuf;
+	char *worldfile, *sysfile, *sysprompt, *tempstr, *maxstr, *action, *wbuf, *sbuf;
 	CFsys *fs;
 	int i, len, off, fd;
 
 	worldfile = nil;
 	sysfile = nil;
 	sysprompt = nil;
+	tempstr = nil;
+	maxstr = nil;
 
 	ARGBEGIN {
 	case 'a':
@@ -84,6 +86,12 @@ threadmain(int argc, char **argv)
 		break;
 	case 'S':
 		sysfile = EARGF(usage());
+		break;
+	case 'T':
+		tempstr = EARGF(usage());
+		break;
+	case 'M':
+		maxstr = EARGF(usage());
 		break;
 	default:
 		usage();
@@ -132,6 +140,20 @@ threadmain(int argc, char **argv)
 	fs = fsmount(fd, nil);
 	if (fs == nil)
 		sysfatal("fsmount %s: %r", addr);
+
+	/* Set sampling parameters if requested. */
+	if (tempstr != nil) {
+		char cbuf[64];
+		snprint(cbuf, sizeof(cbuf), "temp %s", tempstr);
+		if (putfile(fs, "ctl", cbuf, strlen(cbuf)) < 0)
+			exits("ctl");
+	}
+	if (maxstr != nil) {
+		char cbuf[64];
+		snprint(cbuf, sizeof(cbuf), "max %s", maxstr);
+		if (putfile(fs, "ctl", cbuf, strlen(cbuf)) < 0)
+			exits("ctl");
+	}
 
 	/* Set system prompt if requested. */
 	if (sysprompt != nil) {
