@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+narrate-voice - read room state, narrate it via the 9P LLM server, speak it.
+
+    narrate-voice [-a addr] [-w worldfile] [-q] action...
+
+The flow is: pin world state -> write the player action to /prompt ->
+read /stream -> speak each sentence as it completes.
+
+Synthesis is ~300x realtime, so the model is the only thing you wait on.
+Sentences are spoken as soon as they are complete rather than after the
+whole reply, so narration starts while the model is still generating.
+"""
+
+import argparse
+import os
+import queue
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+
+# ---------------------------------------------------------------- 9P client
+
+NOFID = 0xFFFFFFFF
+MSIZE = 8192
+
+Tversion, Rversion = 100, 101
+Tattach, Rattach = 104, 105
+Twalk, Rwalk = 110, 111
+Topen, Ropen = 112, 113
+Tread, Rread = 116, 117
+Twrite, Rwrite = 118, 119
+Tclunk, Rclunk = 120, 121
+Rerror = 107
+
+OREAD, OWRITE = 0, 1
+
+
+class NineP:
+    """Minimal 9P2000 client: enough to walk, read and write files."""
+
+    def __init__(self, addr, timeout=600):
+        host, _, port = addr.rpartition(":")
+        self.sock = socket.create_connection((host or "127.0.0.1", int(port)),
+                                             timeout=30)
+        self.sock.settimeout(timeout)
+        self.tag = 1
+        self.nextfid = 1
+        self.msize = MSIZE
+        self._version()
+        self.root = self._attach()
+
+    # --- framing
+
+    def _rpc(self, mtype, body):
+        tag = self.tag
+        self.tag = (self.tag % 0xFFFE) + 1
+        msg = struct.pack("<IBH", 7 + len(body), mtype, tag) + body
+        self.sock.sendall(msg)
+
+        hdr = self._recv(7)
+        size, rtype, rtag = struct.unpack("<IBH", hdr)
+        data = self._recv(size - 7)
+        if rtype == Rerror:
+            n = struct.unpack("<H", data[:2])[0]
+            raise IOError(data[2:2 + n].decode("utf-8", "replace"))
+        if rtype != mtype + 1:
+            raise IOError("unexpected reply type %d" % rtype)
+        return data
+
+    def _recv(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise IOError("connection closed")
+            buf += chunk
+        return buf
+
+    @staticmethod
+    def _str(s):
+        b = s.encode("utf-8")
+        return struct.pack("<H", len(b)) + b
+
+    # --- operations
+
+    def _version(self):
+        r = self._rpc(Tversion, struct.pack("<I", MSIZE) + self._str("9P2000"))
+        self.msize = min(MSIZE, struct.unpack("<I", r[:4])[0])
+
+    def _attach(self):
+        fid = self.nextfid
+        self.nextfid += 1
+        self._rpc(Tattach, struct.pack("<II", fid, NOFID)
+                  + self._str(os.environ.get("USER", "none")) + self._str(""))
+        return fid
+
+    def _walk(self, name):
+        fid = self.nextfid
+        self.nextfid += 1
+        self._rpc(Twalk, struct.pack("<IIH", self.root, fid, 1) + self._str(name))
+        return fid
+
+    def _open(self, fid, mode):
+        self._rpc(Topen, struct.pack("<IB", fid, mode))
+
+    def _clunk(self, fid):
+        try:
+            self._rpc(Tclunk, struct.pack("<I", fid))
+        except IOError:
+            pass
+
+    def write(self, name, data):
+        fid = self._walk(name)
+        try:
+            self._open(fid, OWRITE)
+            off = 0
+            while off < len(data):
+                chunk = data[off:off + self.msize - 24]
+                r = self._rpc(Twrite, struct.pack("<IQI", fid, off, len(chunk)) + chunk)
+                n = struct.unpack("<I", r[:4])[0]
+                if n == 0:
+                    break
+                off += n
+        finally:
+            self._clunk(fid)
+
+    def read(self, name, offset=0, count=None):
+        """Read from offset. Returns bytes; short read means caught up."""
+        fid = self._walk(name)
+        try:
+            self._open(fid, OREAD)
+            want = count if count is not None else self.msize - 24
+            r = self._rpc(Tread, struct.pack("<IQI", fid, offset, want))
+            n = struct.unpack("<I", r[:4])[0]
+            return r[4:4 + n]
+        finally:
+            self._clunk(fid)
+
+    def close(self):
+        self._clunk(self.root)
+        self.sock.close()
+
+
+# ---------------------------------------------------------------- speech
+
+PIPER_PY = os.path.expanduser("~/.piper-venv/bin/python")
+PIPER_VOICE = os.path.expanduser(
+    "~/.local/share/piper-voices/en_GB-alan-medium.onnx")
+
+
+class Speaker:
+    """
+    Speaks queued sentences in order, on a worker thread.
+
+    Prefers piper (neural, natural) and falls back to espeak-ng (formant,
+    robotic but always available). Synthesis runs several times faster than
+    playback, so queueing per sentence keeps speech close behind the model.
+    """
+
+    def __init__(self, voice=None, rate=145, enabled=True):
+        self.q = queue.Queue()
+        self.rate = rate
+        self.voice = voice
+        self.engine = None
+
+        # -v may name a piper .onnx model or an espeak voice; only treat it as
+        # a piper model if it actually points at a file.
+        model = voice if (voice and voice.endswith(".onnx")) else PIPER_VOICE
+
+        if enabled:
+            if os.path.exists(PIPER_PY) and os.path.exists(model):
+                self.engine = "piper"
+                self.model = model
+            elif shutil.which("espeak-ng"):
+                self.engine = "espeak"
+                print("[piper unavailable; using espeak-ng]", file=sys.stderr)
+            else:
+                print("[no TTS engine; text only]", file=sys.stderr)
+
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _speak_piper(self, text):
+        wav = subprocess.run(
+            [PIPER_PY, "-m", "piper", "-m", self.model, "-f", "-"],
+            input=text.encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout
+        if wav:
+            subprocess.run(["aplay", "-q", "-"], input=wav,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+
+    def _speak_espeak(self, text):
+        subprocess.run(["espeak-ng", "-v", "en-gb", "-s", str(self.rate), text],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=False)
+
+    def _run(self):
+        while True:
+            text = self.q.get()
+            if text is None:
+                return
+            try:
+                if self.engine == "piper":
+                    self._speak_piper(text)
+                elif self.engine == "espeak":
+                    self._speak_espeak(text)
+            except Exception:
+                pass
+
+    def say(self, text):
+        if text.strip():
+            self.q.put(text.strip())
+
+    def drain(self):
+        self.q.put(None)
+        self.thread.join(timeout=300)
+
+
+SENTENCE_END = re.compile(r'(?<=[.!?])["\')\]]*\s')
+
+
+def sentences(buf):
+    """Split off complete sentences; return (list, remainder)."""
+    out, last = [], 0
+    for m in SENTENCE_END.finditer(buf):
+        out.append(buf[last:m.end()].strip())
+        last = m.end()
+    return out, buf[last:]
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(description="narrate a MUD action with speech")
+    ap.add_argument("-a", "--addr", default="127.0.0.1:5647",
+                    help="9P server address (default 127.0.0.1:5647)")
+    ap.add_argument("-w", "--world", help="file holding pinned world state")
+    ap.add_argument("-q", "--quiet", action="store_true", help="text only, no speech")
+    ap.add_argument("-v", "--voice", default=None,
+                    help="piper .onnx model path (default: en_GB-alan-medium)")
+    ap.add_argument("-r", "--rate", type=int, default=145)
+    ap.add_argument("-s", "--sys", help="narrator persona (system prompt)")
+    ap.add_argument("-n", "--max-tokens", type=int, help="cap on generated tokens")
+    ap.add_argument("-t", "--temp", type=float, help="sampling temperature")
+    ap.add_argument("action", nargs="+", help="player action, e.g. look around")
+    args = ap.parse_args()
+
+    action = " ".join(args.action)
+    speaker = Speaker(args.voice, args.rate, enabled=not args.quiet)
+
+    fs = NineP(args.addr)
+    try:
+        # /ctl is per-session, so settings must be sent on this connection.
+        if args.sys:
+            fs.write("ctl", b"sys " + args.sys.encode("utf-8"))
+        if args.max_tokens:
+            fs.write("ctl", b"max %d" % args.max_tokens)
+        if args.temp is not None:
+            fs.write("ctl", b"temp %.2f" % args.temp)
+
+        if args.world:
+            with open(args.world, "rb") as f:
+                world = f.read()
+            fs.write("world", world)
+
+        # Writing /prompt blocks until generation completes. A 9P connection
+        # carries one message at a time, so the write and the /stream reads
+        # cannot share it -- but the session (and its world state) is
+        # per-connection, so a second connection would see an empty world.
+        # Hence: write on this connection, then read the finished stream.
+        fs.write("prompt", action.encode("utf-8"))
+
+        offset, pending = 0, ""
+        while True:
+            chunk = fs.read("stream", offset)
+            if not chunk:
+                break
+            offset += len(chunk)
+            text = chunk.decode("utf-8", "replace")
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            pending += text
+            ready, pending = sentences(pending)
+            for s in ready:
+                speaker.say(s)
+
+        if pending.strip():
+            speaker.say(pending)
+        print()
+    finally:
+        speaker.drain()
+        fs.close()
+
+
+if __name__ == "__main__":
+    main()
